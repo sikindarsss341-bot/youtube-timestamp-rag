@@ -859,7 +859,9 @@ def run_question_answering(question: str, is_quick_action: bool = False):
             st.session_state.answer_data = {
                 "question": question,
                 "answer": None,
-                "error": "I couldn't find relevant information in this video.",
+                "not_found_in_video": True,
+                "ai_fallback_answer": None,
+                "error": None,
                 "timestamps": [],
                 "context_chunks": []
             }
@@ -885,6 +887,8 @@ def run_question_answering(question: str, is_quick_action: bool = False):
             st.session_state.answer_data = {
                 "question": question,
                 "answer": None,
+                "not_found_in_video": False,
+                "ai_fallback_answer": None,
                 "error": "Failed to retrieve context windows.",
                 "timestamps": [],
                 "context_chunks": []
@@ -900,7 +904,22 @@ def run_question_answering(question: str, is_quick_action: bool = False):
             st.session_state.answer_data = {
                 "question": question,
                 "answer": None,
+                "not_found_in_video": False,
+                "ai_fallback_answer": None,
                 "error": "Failed to generate an answer.",
+                "timestamps": [],
+                "context_chunks": []
+            }
+            return
+
+        # Check if the generator determined that info is not in the video context
+        if "couldn't find this information in the video" in answer.lower():
+            st.session_state.answer_data = {
+                "question": question,
+                "answer": None,
+                "not_found_in_video": True,
+                "ai_fallback_answer": None,
+                "error": None,
                 "timestamps": [],
                 "context_chunks": []
             }
@@ -923,10 +942,36 @@ def run_question_answering(question: str, is_quick_action: bool = False):
         st.session_state.answer_data = {
             "question": question,
             "answer": answer,
+            "not_found_in_video": False,
+            "ai_fallback_answer": None,
             "error": None,
             "timestamps": timestamps,
             "context_chunks": context_chunks
         }
+
+
+def generate_general_ai_answer(question: str) -> str:
+    """
+    Answers the user's question using the existing Groq client from app.rag.generator.
+    Strictly answers from general knowledge without pretending it came from the video.
+    Does NOT change existing Groq configuration or create a second client.
+    """
+    from app.rag.generator import client as groq_client
+
+    prompt = (
+        f"Answer the following question accurately and concisely using your general knowledge.\n\n"
+        f"Question:\n{question}\n\n"
+        f"Answer:"
+    )
+    response = groq_client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,
+        max_completion_tokens=1024
+    )
+    return response.choices[0].message.content
 
 
 # -----------------------------------------------------------------------------
@@ -1051,16 +1096,83 @@ if st.session_state.get("video_ready") or st.session_state.get("video_processed"
     if st.session_state.answer_data:
         ans_data = st.session_state.answer_data
         st.markdown("---")
-        st.markdown("### Answer")
 
+        # CASE A: System / Network Error
         if ans_data.get("error"):
-            st.info(ans_data["error"])
+            st.error(ans_data["error"])
+
+        # CASE B: Information NOT found in the video -> Fallback Interaction
+        elif ans_data.get("not_found_in_video"):
+            if not ans_data.get("ai_fallback_answer"):
+                # Clean Fallback Card
+                st.markdown(
+                    f"""
+                    <div style="font-size: 0.95rem; color: {text_secondary}; margin-top: 0.5rem; margin-bottom: 0.75rem; font-weight: 600;">
+                        Question: <em>"{ans_data['question']}"</em>
+                    </div>
+                    <div class="saas-card" style="border-left: 4px solid #F59E0B; margin-top: 0.5rem; padding: 1.5rem;">
+                        <div style="font-size: 1.15rem; font-weight: 700; color: {text_primary}; margin-bottom: 0.75rem;">
+                            🤔 Not found in video
+                        </div>
+                        <div style="font-size: 1.05rem; font-weight: 600; color: {text_primary}; margin-bottom: 0.4rem;">
+                            I couldn't find that in this video.
+                        </div>
+                        <div style="font-size: 0.95rem; color: {text_secondary}; margin-bottom: 0.75rem;">
+                            I can only answer from the video's content in Video Mode.
+                        </div>
+                        <div style="font-size: 0.95rem; font-weight: 600; color: {text_primary}; margin-bottom: 0.2rem;">
+                            Want me to answer it using general AI knowledge?
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                if st.button("🤖 Ask AI Instead", key="ask_ai_fallback_btn", type="primary"):
+                    with st.spinner("Answering using general AI knowledge..."):
+                        try:
+                            ai_answer = generate_general_ai_answer(ans_data["question"])
+                            ans_data["ai_fallback_answer"] = ai_answer
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to generate general AI answer: {e}")
+            else:
+                # User requested AI fallback -> Display separate AI Answer Card
+                st.markdown(
+                    f"""
+                    <div style="font-size: 0.95rem; color: {text_secondary}; margin-top: 0.5rem; margin-bottom: 0.75rem; font-weight: 600;">
+                        Question: <em>"{ans_data['question']}"</em>
+                    </div>
+                    <div class="saas-card" style="border-left: 4px solid #3B82F6; margin-top: 0.5rem; padding: 1.5rem;">
+                        <div style="font-size: 1.25rem; font-weight: 700; color: {text_primary}; margin-bottom: 0.75rem;">
+                            🤖 AI Answer
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                st.markdown(ans_data["ai_fallback_answer"])
+
+                st.markdown(
+                    f"""
+                    <div style="margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 8px; background-color: {chip_bg}; border: 1px solid {chip_border}; font-size: 0.9rem; color: {chip_text}; font-weight: 500;">
+                        ℹ️ This answer was generated using general AI knowledge and was not found in the video.
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+        # CASE C: Information FOUND in the video -> Grounded Video Answer
         else:
-            # Clean Answer Card
             st.markdown(
                 f"""
                 <div style="font-size: 0.95rem; color: {text_secondary}; margin-top: 0.5rem; margin-bottom: 0.75rem; font-weight: 600;">
                     Question: <em>"{ans_data['question']}"</em>
+                </div>
+                <div class="saas-card" style="border-left: 4px solid #10B981; margin-top: 0.5rem; padding: 1.5rem;">
+                    <div style="font-size: 1.25rem; font-weight: 700; color: {text_primary}; margin-bottom: 0.75rem;">
+                        🎥 Video Answer
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True
