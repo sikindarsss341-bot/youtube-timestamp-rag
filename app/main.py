@@ -40,6 +40,14 @@ sys.stderr = SafeStreamWrapper(sys.stderr)
 
 import streamlit as st
 
+# Sync Streamlit Cloud secrets to environment variables if present
+try:
+    for k, v in st.secrets.items():
+        if isinstance(v, str) and k not in os.environ:
+            os.environ[k] = v
+except Exception:
+    pass
+
 # Ensure project root and app directory are in sys.path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))

@@ -13,6 +13,15 @@ if ROOT_DIR not in sys.path:
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
+# Sync Streamlit Cloud secrets to environment variables if present
+try:
+    import streamlit as st
+    for k, v in st.secrets.items():
+        if isinstance(v, str) and k not in os.environ:
+            os.environ[k] = v
+except Exception:
+    pass
+
 import runpy
 
 if __name__ == "__main__":
