@@ -1,21 +1,20 @@
 import os
 import sys
 
-# Ensure UTF-8 output encoding on Windows to prevent UnicodeEncodeError on emojis in backend prints
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    if hasattr(sys.stderr, "reconfigure"):
-        try:
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+# Ensure UTF-8 output encoding across platforms to prevent UnicodeEncodeError on emojis in backend prints
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 class SafeStreamWrapper:
-    """Wraps stream to safely handle UnicodeEncodeError on Windows systems."""
+    """Wraps stream to safely handle UnicodeEncodeError across systems."""
     def __init__(self, target):
         self._target = target
     def write(self, s):
@@ -40,11 +39,19 @@ sys.stderr = SafeStreamWrapper(sys.stderr)
 
 import streamlit as st
 
-# Sync Streamlit Cloud secrets to environment variables if present
+# Deep sync Streamlit Cloud secrets to environment variables before backend imports
 try:
     for k, v in st.secrets.items():
-        if isinstance(v, str) and k not in os.environ:
+        if isinstance(v, str):
             os.environ[k] = v
+            os.environ[k.upper()] = v
+            os.environ[k.lower()] = v
+        elif hasattr(v, "items"):
+            for sub_k, sub_v in v.items():
+                if isinstance(sub_v, str):
+                    os.environ[sub_k] = sub_v
+                    os.environ[sub_k.upper()] = sub_v
+                    os.environ[sub_k.lower()] = sub_v
 except Exception:
     pass
 
@@ -74,6 +81,31 @@ except ImportError:
     from rag.generator import generate_answer
     from rag.crag import evaluate_retrieval
 
+# Ensure vector store and retriever clients use cloud credentials if provided
+try:
+    import app.retrieval.vector_store as vs_mod
+    import app.retrieval.retriever as ret_mod
+    from qdrant_client import QdrantClient
+
+    q_url = os.getenv("QDRANT_URL")
+    q_key = os.getenv("QDRANT_API_KEY")
+    if q_url and q_key:
+        client_host = str(getattr(getattr(vs_mod.client, "_client", None), "_host", ""))
+        if not client_host or "localhost" in client_host or "127.0.0.1" in client_host:
+            configured_qclient = QdrantClient(url=q_url, api_key=q_key, timeout=60)
+            vs_mod.client = configured_qclient
+            ret_mod.client = configured_qclient
+except Exception:
+    pass
+
+try:
+    import app.rag.generator as gen_mod
+    from groq import Groq
+    g_key = os.getenv("GROQ_API_KEY")
+    if g_key and not getattr(gen_mod.client, "api_key", None):
+        gen_mod.client = Groq(api_key=g_key)
+except Exception:
+    pass
 
 # -----------------------------------------------------------------------------
 # Page Configuration
@@ -84,6 +116,21 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Missing secrets warning banner (prompts user to configure Streamlit Cloud Secrets)
+missing_secrets = []
+if not os.getenv("QDRANT_URL"):
+    missing_secrets.append("QDRANT_URL")
+if not os.getenv("QDRANT_API_KEY"):
+    missing_secrets.append("QDRANT_API_KEY")
+if not os.getenv("GROQ_API_KEY"):
+    missing_secrets.append("GROQ_API_KEY")
+
+if missing_secrets:
+    st.warning(
+        f"⚠️ **Missing Cloud Secrets:** `{', '.join(missing_secrets)}`.  \n"
+        "Please configure them in your Streamlit Cloud dashboard: **App Settings** (three dots at top right) ➔ **Secrets**."
+    )
 
 # -----------------------------------------------------------------------------
 # Session State Initialization
@@ -662,9 +709,13 @@ def process_youtube_video(url: str):
             create_collection()
             create_payload_indexes()
             store_chunks(chunks, embeddings, video_id)
-        except Exception:
+        except Exception as e:
             status_box.update(label="Indexing failed", state="error")
-            st.error("Failed to index the video.")
+            print(f"[INDEX ERROR] {type(e).__name__}: {e}", flush=True)
+            if not os.getenv("QDRANT_URL") or not os.getenv("QDRANT_API_KEY"):
+                st.error("Missing Qdrant configuration! Please configure QDRANT_URL and QDRANT_API_KEY in your Streamlit Cloud Secrets (or .env file).")
+            else:
+                st.error(f"Failed to index the video: {e}")
             return
 
         # 5. Video ready!
